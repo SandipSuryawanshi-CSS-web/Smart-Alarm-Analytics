@@ -1,0 +1,139 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-bg-base: #0B0F14;
+  --color-bg-panel: #111822;
+  --color-bg-surface: #17212F;
+  --color-bg-hover: #1E2B3D;
+  --color-border-subtle: #1E293B;
+  --color-border-strong: #334155;
+  
+  /* ISA-18.2 Alarm Standard Colors */
+  --color-alarm-critical: #EF4444; /* Vivid Red */
+  --color-alarm-critical-bg: rgba(239, 68, 68, 0.15);
+  --color-alarm-critical-border: #DC2626;
+
+  --color-alarm-high: #F97316; /* Bright Orange */
+  --color-alarm-high-bg: rgba(249, 115, 22, 0.15);
+  --color-alarm-high-border: #EA580C;
+
+  --color-alarm-medium: #EAB308; /* Amber / Yellow */
+  --color-alarm-medium-bg: rgba(234, 179, 8, 0.14);
+  --color-alarm-medium-border: #CA8A04;
+
+  --color-alarm-low: #3B82F6; /* Steel Blue */
+  --color-alarm-low-bg: rgba(59, 130, 246, 0.14);
+  --color-alarm-low-border: #2563EB;
+
+  /* Industrial Accent (strictly non-alarm: cool cyan/slate) */
+  --color-hmi-accent: #06B6D4;
+  --color-hmi-accent-hover: #0891B2;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-bg-base);
+  color: #E2E8F0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+/* Mono numbers for SCADA alignment */
+.font-mono-numbers {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ISA-18.2 Unacknowledged Alarm Flashing (1.5 Hz cycle) */
+@keyframes alarm-flash-critical {
+  0%, 100% {
+    background-color: rgba(239, 68, 68, 0.28);
+    border-color: #EF4444;
+    box-shadow: 0 0 12px rgba(239, 68, 68, 0.4);
+  }
+  50% {
+    background-color: rgba(239, 68, 68, 0.06);
+    border-color: rgba(239, 68, 68, 0.35);
+    box-shadow: none;
+  }
+}
+
+@keyframes alarm-flash-high {
+  0%, 100% {
+    background-color: rgba(249, 115, 22, 0.28);
+    border-color: #F97316;
+    box-shadow: 0 0 10px rgba(249, 115, 22, 0.35);
+  }
+  50% {
+    background-color: rgba(249, 115, 22, 0.06);
+    border-color: rgba(249, 115, 22, 0.35);
+    box-shadow: none;
+  }
+}
+
+@keyframes alarm-flash-medium {
+  0%, 100% {
+    background-color: rgba(234, 179, 8, 0.24);
+    border-color: #EAB308;
+  }
+  50% {
+    background-color: rgba(234, 179, 8, 0.05);
+    border-color: rgba(234, 179, 8, 0.3);
+  }
+}
+
+@keyframes alarm-flash-low {
+  0%, 100% {
+    background-color: rgba(59, 130, 246, 0.24);
+    border-color: #3B82F6;
+  }
+  50% {
+    background-color: rgba(59, 130, 246, 0.05);
+    border-color: rgba(59, 130, 246, 0.3);
+  }
+}
+
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 1.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.alarm-unack-critical {
+  animation: alarm-flash-critical 1.0s infinite;
+}
+
+.alarm-unack-high {
+  animation: alarm-flash-high 1.2s infinite;
+}
+
+.alarm-unack-medium {
+  animation: alarm-flash-medium 1.4s infinite;
+}
+
+.alarm-unack-low {
+  animation: alarm-flash-low 1.6s infinite;
+}
+
+/* Custom compact scrollbar for industrial screens */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0F172A;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 1px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
