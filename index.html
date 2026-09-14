@@ -1,0 +1,1744 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SCADA HMI // ISA-18.2 Alarm & Event Management System</title>
+  <meta name="description" content="Mission-critical industrial SCADA HMI dashboard complying with ANSI/ISA-18.2 standards for high-speed Siemens PLC data via Redis buffers." />
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            scada: {
+              base: '#0B0F14',
+              panel: '#111822',
+              surface: '#17212F',
+              hover: '#1D2A3C',
+              border: '#1E293B',
+              borderStrong: '#334155',
+              accent: '#06B6D4',
+            },
+            alarm: {
+              critical: '#EF4444',
+              high: '#F97316',
+              med: '#EAB308',
+              low: '#3B82F6',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- React 18 & Babel Standalone -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    body {
+      margin: 0;
+      background-color: #0B0F14;
+      color: #E2E8F0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      overflow-x: hidden;
+    }
+
+    .font-mono-numbers {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ISA-18.2 Unacknowledged Alarm Flashing Standards */
+    @keyframes flash-crit {
+      0%, 100% {
+        background-color: rgba(239, 68, 68, 0.32);
+        border-color: #EF4444;
+        box-shadow: 0 0 12px rgba(239, 68, 68, 0.45);
+      }
+      50% {
+        background-color: rgba(239, 68, 68, 0.06);
+        border-color: rgba(239, 68, 68, 0.3);
+        box-shadow: none;
+      }
+    }
+
+    @keyframes flash-high {
+      0%, 100% {
+        background-color: rgba(249, 115, 22, 0.32);
+        border-color: #F97316;
+        box-shadow: 0 0 10px rgba(249, 115, 22, 0.4);
+      }
+      50% {
+        background-color: rgba(249, 115, 22, 0.06);
+        border-color: rgba(249, 115, 22, 0.3);
+        box-shadow: none;
+      }
+    }
+
+    @keyframes flash-med {
+      0%, 100% {
+        background-color: rgba(234, 179, 8, 0.28);
+        border-color: #EAB308;
+      }
+      50% {
+        background-color: rgba(234, 179, 8, 0.05);
+        border-color: rgba(234, 179, 8, 0.3);
+      }
+    }
+
+    @keyframes flash-low {
+      0%, 100% {
+        background-color: rgba(59, 130, 246, 0.28);
+        border-color: #3B82F6;
+      }
+      50% {
+        background-color: rgba(59, 130, 246, 0.05);
+        border-color: rgba(59, 130, 246, 0.3);
+      }
+    }
+
+    .alarm-unack-critical {
+      animation: flash-crit 1.0s infinite;
+    }
+    .alarm-unack-high {
+      animation: flash-high 1.2s infinite;
+    }
+    .alarm-unack-medium {
+      animation: flash-med 1.4s infinite;
+    }
+    .alarm-unack-low {
+      animation: flash-low 1.6s infinite;
+    }
+
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #090D14;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #273549;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #3B4E68;
+    }
+  </style>
+</head>
+<body class="bg-[#0B0F14] text-slate-100 antialiased select-none">
+  <div id="root"></div>
+
+  <!-- React HMI Application -->
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+    // --- MOCK DATA DEFINITIONS ---
+    const INITIAL_ACTIVE_ALARMS = [
+      {
+        id: 'ALM-1092',
+        timestamp: '2026-09-14 08:52:14',
+        priority: 'CRITICAL',
+        tagName: 'TK101_Level',
+        node: 'S7-1500_PLC_01 [Node 4]',
+        description: 'High-High Liquid Level Exceeded (Trip Limit 92.0%)',
+        processValue: 94.6,
+        tripLimit: 92.0,
+        engineeringUnit: '%',
+        status: 'UNACK_ALARM',
+      },
+      {
+        id: 'ALM-1088',
+        timestamp: '2026-09-14 08:49:02',
+        priority: 'CRITICAL',
+        tagName: 'COMPR_VIB_X',
+        node: 'S7-1500_PLC_02 [Node 8]',
+        description: 'Main Compressor Drive Radial Vibration High-High',
+        processValue: 12.8,
+        tripLimit: 11.5,
+        engineeringUnit: 'mm/s',
+        status: 'UNACK_ALARM',
+      },
+      {
+        id: 'ALM-1074',
+        timestamp: '2026-09-14 08:41:33',
+        priority: 'HIGH',
+        tagName: 'PUMP02_Press',
+        node: 'S7-1200_PLC_03 [Node 2]',
+        description: 'Booster Pump Discharge Pressure Low',
+        processValue: 1.85,
+        tripLimit: 2.20,
+        engineeringUnit: 'bar',
+        status: 'ACK_ALARM',
+        acknowledgedBy: 'Operator_John',
+        acknowledgedAt: '2026-09-14 08:43:10',
+      },
+      {
+        id: 'ALM-1065',
+        timestamp: '2026-09-14 08:35:12',
+        priority: 'HIGH',
+        tagName: 'MTR04_Temp',
+        node: 'S7-1500_PLC_01 [Node 6]',
+        description: 'Extruder Drive Stator Winding Over-Temperature',
+        processValue: 114.2,
+        tripLimit: 110.0,
+        engineeringUnit: '°C',
+        status: 'UNACK_ALARM',
+      },
+      {
+        id: 'ALM-1051',
+        timestamp: '2026-09-14 08:22:45',
+        priority: 'MEDIUM',
+        tagName: 'REBOIL_TEMP',
+        node: 'S7-1500_PLC_02 [Node 3]',
+        description: 'Distillation Column Reboiler Steam Temp High Deviation',
+        processValue: 186.4,
+        tripLimit: 180.0,
+        engineeringUnit: '°C',
+        status: 'ACK_ALARM',
+        acknowledgedBy: 'Supervisor_Elena',
+        acknowledgedAt: '2026-09-14 08:24:19',
+      },
+      {
+        id: 'ALM-1044',
+        timestamp: '2026-09-14 08:14:09',
+        priority: 'MEDIUM',
+        tagName: 'LINE3_FLOW_RATE',
+        node: 'S7-1200_PLC_04 [Node 5]',
+        description: 'Feed Line Coriolis Meter Mass Flow Deviation',
+        processValue: 410.2,
+        tripLimit: 450.0,
+        engineeringUnit: 'kg/h',
+        status: 'UNACK_ALARM',
+      },
+      {
+        id: 'ALM-1032',
+        timestamp: '2026-09-14 07:58:20',
+        priority: 'LOW',
+        tagName: 'FILTER_DIFF_P',
+        node: 'S7-1200_PLC_03 [Node 1]',
+        description: 'Inlet Air Cartridge Filter Differential Pressure High',
+        processValue: 34.1,
+        tripLimit: 30.0,
+        engineeringUnit: 'kPa',
+        status: 'ACK_ALARM',
+        acknowledgedBy: 'Operator_John',
+        acknowledgedAt: '2026-09-14 08:02:11',
+      },
+      {
+        id: 'ALM-1020',
+        timestamp: '2026-09-14 07:44:05',
+        priority: 'LOW',
+        tagName: 'CHILLER_WATER_LVL',
+        node: 'S7-1200_PLC_04 [Node 9]',
+        description: 'Secondary Chilled Loop Expansion Tank Level Warning',
+        processValue: 42.0,
+        tripLimit: 45.0,
+        engineeringUnit: '%',
+        status: 'ACK_ALARM',
+        acknowledgedBy: 'Operator_John',
+        acknowledgedAt: '2026-09-14 07:46:00',
+      },
+    ];
+
+    const MOCK_HISTORICAL_ALARMS = [
+      {
+        id: 'HA-4091',
+        tagName: 'PUMP02_Press',
+        node: 'S7-1200_PLC_03 [Node 2]',
+        description: 'Booster Pump Discharge Pressure Low',
+        priority: 'HIGH',
+        timeIn: '2026-09-14 07:15:22',
+        timeOut: '2026-09-14 07:29:44',
+        durationFormatted: '00:14:22',
+        operatorAck: 'Operator_John (07:16:04)',
+        chatteringDetected: true,
+      },
+      {
+        id: 'HA-4082',
+        tagName: 'STEAM_HDR_P1',
+        node: 'S7-1500_PLC_01 [Node 1]',
+        description: 'Main Steam Header 40-Bar Pressure High-High (Trip)',
+        priority: 'CRITICAL',
+        timeIn: '2026-09-14 06:10:04',
+        timeOut: '2026-09-14 06:48:19',
+        durationFormatted: '00:38:15',
+        operatorAck: 'Supervisor_Elena (06:10:32)',
+        chatteringDetected: false,
+      },
+      {
+        id: 'HA-4075',
+        tagName: 'COMPR_VIB_X',
+        node: 'S7-1500_PLC_02 [Node 8]',
+        description: 'Main Compressor Drive Radial Vibration High',
+        priority: 'HIGH',
+        timeIn: '2026-09-14 05:42:10',
+        timeOut: '2026-09-14 06:05:32',
+        durationFormatted: '00:23:22',
+        operatorAck: 'Operator_Dave (05:43:00)',
+        chatteringDetected: true,
+      },
+      {
+        id: 'HA-4061',
+        tagName: 'TK101_Level',
+        node: 'S7-1500_PLC_01 [Node 4]',
+        description: 'Storage Vessel High Level Switch Tripped',
+        priority: 'CRITICAL',
+        timeIn: '2026-09-14 04:30:15',
+        timeOut: '2026-09-14 05:12:00',
+        durationFormatted: '00:41:45',
+        operatorAck: 'Operator_Dave (04:31:12)',
+        chatteringDetected: false,
+      },
+      {
+        id: 'HA-4053',
+        tagName: 'MTR04_Temp',
+        node: 'S7-1500_PLC_01 [Node 6]',
+        description: 'Extruder Drive Stator Winding Over-Temperature',
+        priority: 'MEDIUM',
+        timeIn: '2026-09-14 03:15:00',
+        timeOut: '2026-09-14 03:44:18',
+        durationFormatted: '00:29:18',
+        operatorAck: 'Operator_Dave (03:17:40)',
+        chatteringDetected: false,
+      },
+      {
+        id: 'HA-4040',
+        tagName: 'CHILLER_WATER_LVL',
+        node: 'S7-1200_PLC_04 [Node 9]',
+        description: 'Secondary Chilled Loop Expansion Tank Low',
+        priority: 'LOW',
+        timeIn: '2026-09-14 02:04:18',
+        timeOut: '2026-09-14 02:18:50',
+        durationFormatted: '00:14:32',
+        operatorAck: 'Operator_Dave (02:09:15)',
+        chatteringDetected: false,
+      },
+    ];
+
+    const MOCK_SYSTEM_EVENTS = [
+      {
+        id: 'EVT-9812',
+        timestamp: '2026-09-14 08:50:30',
+        category: 'Agentic Recommendation',
+        userId: 'RCA_Agent_1',
+        userRole: 'AI Agent',
+        nodeAffected: 'PUMP02_Press',
+        actionDetails: 'Detected cavitation signature; recommended throttle valve V-204 closure to 58% to prevent impending trip',
+      },
+      {
+        id: 'EVT-9807',
+        timestamp: '2026-09-14 08:45:10',
+        category: 'Setpoint Change',
+        userId: 'Operator_John',
+        userRole: 'Operator',
+        nodeAffected: 'COOLING_LOOP_SP',
+        previousValue: '45.0 °C',
+        newValue: '42.5 °C',
+        actionDetails: 'Adjusted Cooling Water Supply Setpoint from 45.0°C to 42.5°C per shift supervisor directive',
+      },
+      {
+        id: 'EVT-9799',
+        timestamp: '2026-09-14 08:30:00',
+        category: 'User Login',
+        userId: 'Operator_John',
+        userRole: 'Operator',
+        nodeAffected: 'Console_HMI_04',
+        actionDetails: 'Operator authenticated for Shift B operations (Auth token verified, 2FA valid)',
+      },
+      {
+        id: 'EVT-9784',
+        timestamp: '2026-09-14 07:55:18',
+        category: 'Interlock Override',
+        userId: 'Supervisor_Elena',
+        userRole: 'Supervisor',
+        nodeAffected: 'IL-204_BYPASS',
+        previousValue: 'ARMED',
+        newValue: 'BYPASSED',
+        actionDetails: 'Temporary 30-min bypass authorized for strainer purge during routine maintenance',
+      },
+      {
+        id: 'EVT-9770',
+        timestamp: '2026-09-14 07:15:00',
+        category: 'Recipe Change',
+        userId: 'Process_Eng_Alex',
+        userRole: 'Process Engineer',
+        nodeAffected: 'POLY_BATCH_02',
+        actionDetails: 'Loaded Grade HDPE-5540 high-density feed recipe configuration into PLC batch sequencer',
+      },
+      {
+        id: 'EVT-9762',
+        timestamp: '2026-09-14 06:50:22',
+        category: 'Calibration',
+        userId: 'Tech_Marcus',
+        userRole: 'Operator',
+        nodeAffected: 'TK101_Level',
+        actionDetails: 'Completed 4-20mA loop calibration on Guided Radar Transmitter LT-101 (Zero: 4.00mA, Span: 20.01mA)',
+      },
+    ];
+
+    const MOCK_PARETO = [
+      { tagName: 'PUMP02_Press', description: 'Booster Pump Discharge Press', count: 48, percentage: 38.4, cumulative: 38.4, priority: 'HIGH' },
+      { tagName: 'COMPR_VIB_X', description: 'Compressor Radial Vibration', count: 32, percentage: 25.6, cumulative: 64.0, priority: 'HIGH' },
+      { tagName: 'TK101_Level', description: 'Storage Vessel High Level Switch', count: 21, percentage: 16.8, cumulative: 80.8, priority: 'CRITICAL' },
+      { tagName: 'MTR04_Temp', description: 'Extruder Drive Stator Winding', count: 14, percentage: 11.2, cumulative: 92.0, priority: 'MEDIUM' },
+      { tagName: 'FILTER_DIFF_P', description: 'Air Cartridge Filter Diff Press', count: 10, percentage: 8.0, cumulative: 100.0, priority: 'LOW' },
+    ];
+
+    const TIME_SERIES_BUCKETS = {
+      '1H': [
+        { timeLabel: '08:00', total: 4 },
+        { timeLabel: '08:10', total: 7, tripMarker: 'Feed Cavitation' },
+        { timeLabel: '08:20', total: 3 },
+        { timeLabel: '08:30', total: 6 },
+        { timeLabel: '08:40', total: 9 },
+        { timeLabel: '08:50', total: 5 },
+      ],
+      '24H': [
+        { timeLabel: '09:00', total: 4 },
+        { timeLabel: '12:00', total: 6 },
+        { timeLabel: '15:00', total: 5 },
+        { timeLabel: '18:00', total: 9 },
+        { timeLabel: '21:00', total: 4 },
+        { timeLabel: '00:00', total: 4 },
+        { timeLabel: '03:00', total: 8 },
+        { timeLabel: '06:00', total: 23, tripMarker: 'Boiler 2 Trip Flood' },
+        { timeLabel: '08:55', total: 8 },
+      ],
+      '7D': [
+        { timeLabel: 'Mon 09/08', total: 44 },
+        { timeLabel: 'Tue 09/09', total: 33 },
+        { timeLabel: 'Wed 09/10', total: 74, tripMarker: 'Substation Upset' },
+        { timeLabel: 'Thu 09/11', total: 39 },
+        { timeLabel: 'Fri 09/12', total: 50 },
+        { timeLabel: 'Sat 09/13', total: 27 },
+        { timeLabel: 'Sun 09/14', total: 51 },
+      ]
+    };
+
+    // --- MAIN DASHBOARD COMPONENT ---
+    function IndustrialDashboard() {
+      const [currentTab, setCurrentTab] = useState('ACTIVE'); // 'ACTIVE' | 'HISTORICAL' | 'EVENTS'
+      const [activeAlarms, setActiveAlarms] = useState(INITIAL_ACTIVE_ALARMS);
+      const [historicalAlarms, setHistoricalAlarms] = useState(MOCK_HISTORICAL_ALARMS);
+      const [systemEvents, setSystemEvents] = useState(MOCK_SYSTEM_EVENTS);
+      const [audioMuted, setAudioMuted] = useState(false);
+      const [isSimulating, setIsSimulating] = useState(true);
+      const [currentTime, setCurrentTime] = useState('');
+
+      // Web Audio API Horn Sound Synth
+      const audioCtxRef = useRef(null);
+
+      const playAlarmSound = useCallback((isCritical) => {
+        if (audioMuted) return;
+        try {
+          if (!audioCtxRef.current) {
+            const AudioClass = window.AudioContext || window.webkitAudioContext;
+            audioCtxRef.current = new AudioClass();
+          }
+          const ctx = audioCtxRef.current;
+          if (ctx.state === 'suspended') ctx.resume();
+
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+
+          osc.type = isCritical ? 'sawtooth' : 'sine';
+          osc.frequency.setValueAtTime(isCritical ? 880 : 660, ctx.currentTime);
+          osc.frequency.exponentialRampToValueAtTime(isCritical ? 440 : 520, ctx.currentTime + 0.16);
+
+          gain.gain.setValueAtTime(0.12, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
+
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+
+          osc.start();
+          osc.stop(ctx.currentTime + 0.21);
+        } catch (e) {
+          // Audio blocked until user clicks
+        }
+      }, [audioMuted]);
+
+      // Clock Updater
+      useEffect(() => {
+        const update = () => {
+          const d = new Date();
+          const p = (n) => n.toString().padStart(2, '0');
+          setCurrentTime(`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`);
+        };
+        update();
+        const id = setInterval(update, 1000);
+        return () => clearInterval(id);
+      }, []);
+
+      // Derived counts
+      const unackCount = activeAlarms.filter(a => a.status === 'UNACK_ALARM').length;
+      const criticalCount = activeAlarms.filter(a => a.priority === 'CRITICAL').length;
+      const highCount = activeAlarms.filter(a => a.priority === 'HIGH').length;
+      const medCount = activeAlarms.filter(a => a.priority === 'MEDIUM').length;
+      const lowCount = activeAlarms.filter(a => a.priority === 'LOW').length;
+
+      // Unacknowledged warning tone interval
+      useEffect(() => {
+        if (unackCount > 0 && !audioMuted) {
+          const timer = setInterval(() => {
+            playAlarmSound(criticalCount > 0);
+          }, 4500);
+          return () => clearInterval(timer);
+        }
+      }, [unackCount, criticalCount, audioMuted, playAlarmSound]);
+
+      // Acknowledge handler
+      const handleAcknowledge = (alarmIds) => {
+        const d = new Date();
+        const p = (n) => n.toString().padStart(2, '0');
+        const timeStr = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+
+        setActiveAlarms(prev => prev.map(a => {
+          if (alarmIds.includes(a.id)) {
+            return {
+              ...a,
+              status: 'ACK_ALARM',
+              acknowledgedBy: 'Operator_John',
+              acknowledgedAt: timeStr,
+            };
+          }
+          return a;
+        }));
+
+        // Log audit event
+        const newAudits = alarmIds.map(id => {
+          const found = activeAlarms.find(a => a.id === id);
+          return {
+            id: 'EVT-ACK-' + Date.now() + '-' + Math.random().toString(36).substring(2, 5),
+            timestamp: timeStr,
+            category: 'Setpoint Change',
+            userId: 'Operator_John',
+            userRole: 'Operator',
+            nodeAffected: found ? found.tagName : id,
+            actionDetails: `Operator acknowledged ${found?.priority || ''} alarm on ${found?.tagName || id} (${found?.description || ''})`,
+          };
+        });
+        setSystemEvents(prev => [...newAudits, ...prev]);
+      };
+
+      // Live PLC Simulation stream
+      useEffect(() => {
+        if (!isSimulating) return;
+        const candidates = [
+          { tag: 'STEAM_HDR_P2', node: 'S7-1500_PLC_01 [Node 2]', desc: 'Aux Boiler Steam Header Low Pressure', pri: 'HIGH', val: 28.4, lim: 32.0, unit: 'bar' },
+          { tag: 'DISTILL_FEED_F1', node: 'S7-1500_PLC_02 [Node 4]', desc: 'Column Feed Differential Flow Rate Low', pri: 'MEDIUM', val: 320.1, lim: 350.0, unit: 'm³/h' },
+          { tag: 'FLARE_PILOT_UV', node: 'S7-1200_PLC_03 [Node 5]', desc: 'Flare Stack Pilot Burner UV Sensor Unstable', pri: 'CRITICAL', val: 12.0, lim: 30.0, unit: '%' },
+          { tag: 'COOLING_TWR_FAN2', node: 'S7-1200_PLC_04 [Node 3]', desc: 'Cooling Tower Fan 2 Vibration Warning', pri: 'LOW', val: 5.6, lim: 5.0, unit: 'mm/s' },
+        ];
+
+        let index = 0;
+        const interval = setInterval(() => {
+          const item = candidates[index % candidates.length];
+          index++;
+
+          const d = new Date();
+          const p = (n) => n.toString().padStart(2, '0');
+          const timeStr = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+
+          const newA = {
+            id: 'ALM-' + (Date.now() % 10000),
+            timestamp: timeStr,
+            priority: item.pri,
+            tagName: item.tag,
+            node: item.node,
+            description: item.desc,
+            processValue: item.val,
+            tripLimit: item.lim,
+            engineeringUnit: item.unit,
+            status: 'UNACK_ALARM',
+          };
+
+          setActiveAlarms(prev => {
+            const filtered = prev.filter(x => x.tagName !== item.tag);
+            return [newA, ...filtered.slice(0, 9)];
+          });
+
+          playAlarmSound(item.pri === 'CRITICAL');
+        }, 12000);
+
+        return () => clearInterval(interval);
+      }, [isSimulating, playAlarmSound]);
+
+      return (
+        <div className="flex flex-col min-h-screen bg-[#0B0F14] text-slate-100 font-sans">
+          {/* 1. Top Summary Banner */}
+          <header className="bg-[#0D131C] border-b border-slate-800 px-4 py-2 text-slate-200">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              {/* Branding & Telemetry */}
+              <div className="flex items-center space-x-4">
+                <div className="flex items-center space-x-2">
+                  <div className="w-2.5 h-6 bg-cyan-500"></div>
+                  <div>
+                    <div className="flex items-center space-x-2">
+                      <span className="font-bold tracking-wider text-sm text-slate-100 uppercase">
+                        SCADA HMI // ALARM MANAGEMENT
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 bg-slate-800 text-cyan-400 border border-slate-700 font-mono tracking-wider font-semibold">
+                        ISA-18.2 COMPLIANT
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-slate-400 flex items-center gap-2">
+                      <span>Unit: <strong className="text-slate-300 font-normal">Ethylene Train B</strong></span>
+                      <span className="text-slate-600">|</span>
+                      <span>Console: <strong className="text-slate-300 font-normal">CR-04 (Lead Tech)</strong></span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="hidden lg:flex items-center space-x-3 pl-4 border-l border-slate-800 text-xs font-mono-numbers">
+                  {/* Siemens S7-1500 Status */}
+                  <div className="flex items-center space-x-1.5 bg-slate-900/90 px-2.5 py-1 border border-slate-800">
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                    </span>
+                    <span className="text-[11px] text-slate-400">SIEMENS S7-1500:</span>
+                    <span className="text-[11px] text-emerald-400 font-semibold">ONLINE (9ms)</span>
+                  </div>
+
+                  {/* Redis Ring Buffer Status */}
+                  <div className="flex items-center space-x-1.5 bg-slate-900/90 px-2.5 py-1 border border-slate-800">
+                    <span className="w-1.5 h-1.5 bg-cyan-400 rounded-none"></span>
+                    <span className="text-[11px] text-slate-400">REDIS BUFFER:</span>
+                    <span className="text-[11px] text-cyan-300 font-semibold">STREAM 1.2k msg/s</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* ISA-18.2 4-Tier Counters */}
+              <div className="flex items-center space-x-1 bg-[#090D14] p-1 border border-slate-800 text-xs">
+                <div className={`flex items-center space-x-1.5 px-2.5 py-1 border ${criticalCount > 0 ? 'bg-red-950/40 border-red-700/60 text-red-300' : 'bg-slate-900/50 border-slate-800 text-slate-400'}`}>
+                  <span className="w-2.5 h-2.5 bg-red-600 rotate-45 transform inline-block flex-shrink-0"></span>
+                  <span className="text-[10px] font-bold tracking-wider">CRITICAL:</span>
+                  <span className="font-mono-numbers font-extrabold text-xs text-red-400">{criticalCount}</span>
+                </div>
+
+                <div className={`flex items-center space-x-1.5 px-2.5 py-1 border ${highCount > 0 ? 'bg-orange-950/40 border-orange-700/60 text-orange-300' : 'bg-slate-900/50 border-slate-800 text-slate-400'}`}>
+                  <span className="w-2.5 h-2.5 bg-orange-500 inline-block flex-shrink-0"></span>
+                  <span className="text-[10px] font-bold tracking-wider">HIGH:</span>
+                  <span className="font-mono-numbers font-extrabold text-xs text-orange-400">{highCount}</span>
+                </div>
+
+                <div className={`flex items-center space-x-1.5 px-2.5 py-1 border ${medCount > 0 ? 'bg-yellow-950/30 border-yellow-700/50 text-yellow-300' : 'bg-slate-900/50 border-slate-800 text-slate-400'}`}>
+                  <span className="w-2.5 h-2.5 rounded-full bg-yellow-400 inline-block flex-shrink-0"></span>
+                  <span className="text-[10px] font-bold tracking-wider">MED:</span>
+                  <span className="font-mono-numbers font-extrabold text-xs text-yellow-300">{medCount}</span>
+                </div>
+
+                <div className={`flex items-center space-x-1.5 px-2.5 py-1 border ${lowCount > 0 ? 'bg-blue-950/30 border-blue-700/50 text-blue-300' : 'bg-slate-900/50 border-slate-800 text-slate-400'}`}>
+                  <span className="w-0 h-0 border-l-[5px] border-l-transparent border-r-[5px] border-r-transparent border-t-[8px] border-t-blue-400 inline-block flex-shrink-0"></span>
+                  <span className="text-[10px] font-bold tracking-wider">LOW:</span>
+                  <span className="font-mono-numbers font-extrabold text-xs text-blue-300">{lowCount}</span>
+                </div>
+              </div>
+
+              {/* Master Controls & Clock */}
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => setIsSimulating(!isSimulating)}
+                  className={`px-2.5 py-1 text-xs border font-mono tracking-wider transition-colors flex items-center space-x-1.5 ${
+                    isSimulating 
+                      ? 'bg-cyan-950/60 border-cyan-500 text-cyan-300 hover:bg-cyan-900/70' 
+                      : 'bg-slate-900 border-slate-700 text-slate-400 hover:bg-slate-800'
+                  }`}
+                  title="Toggle real-time Siemens PLC event simulation"
+                >
+                  <span className={`w-2 h-2 ${isSimulating ? 'bg-cyan-400 animate-pulse' : 'bg-slate-600'}`}></span>
+                  <span>SIM: {isSimulating ? 'STREAMING' : 'PAUSED'}</span>
+                </button>
+
+                <button
+                  onClick={() => setAudioMuted(!audioMuted)}
+                  className={`px-2.5 py-1 text-xs border transition-colors flex items-center space-x-1.5 font-medium ${
+                    audioMuted 
+                      ? 'bg-slate-800/80 border-slate-700 text-slate-400 hover:bg-slate-700' 
+                      : 'bg-amber-950/50 border-amber-600 text-amber-300 hover:bg-amber-900/60'
+                  }`}
+                  title="Silence or Arm Audible Alarm Horn"
+                >
+                  <span>{audioMuted ? '🔕 HORN SILENCED' : '🔔 HORN ARMED'}</span>
+                </button>
+
+                <div className="bg-black/70 border border-slate-800 px-2.5 py-1 text-right font-mono-numbers">
+                  <div className="text-[9px] text-slate-500 uppercase tracking-widest leading-none">PLANT TIME</div>
+                  <div className="text-xs font-semibold text-slate-200 tracking-wide leading-tight">{currentTime || '2026-09-14 08:55:00'}</div>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          {/* 2. Main Layout with Sidebar */}
+          <div className="flex flex-1 overflow-hidden">
+            {/* Left-Side Navigation */}
+            <aside className="w-64 bg-[#0A0E15] border-r border-slate-800 flex flex-col justify-between flex-shrink-0">
+              <div className="py-3">
+                <div className="px-3 pb-2 mb-2 border-b border-slate-800/80">
+                  <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">
+                    Console Navigation
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    High-Performance HMI (Level 2)
+                  </div>
+                </div>
+
+                <nav className="space-y-1 px-2">
+                  {/* Tab 1 */}
+                  <button
+                    onClick={() => setCurrentTab('ACTIVE')}
+                    className={`w-full text-left px-3 py-2.5 transition-all flex items-center justify-between border-l-2 ${
+                      currentTab === 'ACTIVE'
+                        ? 'bg-[#15202E] border-cyan-400 text-cyan-200'
+                        : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900/80'
+                    }`}
+                  >
+                    <div className="flex items-center space-x-2.5">
+                      <span className={currentTab === 'ACTIVE' ? 'text-cyan-400' : 'text-slate-500'}>⚡</span>
+                      <div>
+                        <div className="text-xs font-semibold tracking-wide">Active Alarms</div>
+                        <div className="text-[10px] text-slate-400">Real-Time Grid &amp; Ack</div>
+                      </div>
+                    </div>
+                    {unackCount > 0 ? (
+                      <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 border bg-red-950/80 text-red-300 border-red-700 animate-pulse">
+                        {unackCount} UNACK
+                      </span>
+                    ) : (
+                      <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 border bg-slate-800/90 text-slate-300 border-slate-700">
+                        {activeAlarms.length}
+                      </span>
+                    )}
+                  </button>
+
+                  {/* Tab 2 */}
+                  <button
+                    onClick={() => setCurrentTab('HISTORICAL')}
+                    className={`w-full text-left px-3 py-2.5 transition-all flex items-center justify-between border-l-2 ${
+                      currentTab === 'HISTORICAL'
+                        ? 'bg-[#15202E] border-cyan-400 text-cyan-200'
+                        : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900/80'
+                    }`}
+                  >
+                    <div className="flex items-center space-x-2.5">
+                      <span className={currentTab === 'HISTORICAL' ? 'text-cyan-400' : 'text-slate-500'}>📊</span>
+                      <div>
+                        <div className="text-xs font-semibold tracking-wide">Historical Alarms</div>
+                        <div className="text-[10px] text-slate-400">ISA-18.2 Analytics &amp; Pareto</div>
+                      </div>
+                    </div>
+                  </button>
+
+                  {/* Tab 3 */}
+                  <button
+                    onClick={() => setCurrentTab('EVENTS')}
+                    className={`w-full text-left px-3 py-2.5 transition-all flex items-center justify-between border-l-2 ${
+                      currentTab === 'EVENTS'
+                        ? 'bg-[#15202E] border-cyan-400 text-cyan-200'
+                        : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900/80'
+                    }`}
+                  >
+                    <div className="flex items-center space-x-2.5">
+                      <span className={currentTab === 'EVENTS' ? 'text-cyan-400' : 'text-slate-500'}>📝</span>
+                      <div>
+                        <div className="text-xs font-semibold tracking-wide">System Event Log</div>
+                        <div className="text-[10px] text-slate-400">Audit Trail &amp; Setpoints</div>
+                      </div>
+                    </div>
+                    <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 border bg-slate-800/90 text-slate-300 border-slate-700">
+                      AUDIT
+                    </span>
+                  </button>
+                </nav>
+              </div>
+
+              {/* Sidebar Footer Metadata */}
+              <div className="p-3 border-t border-slate-800 bg-[#080B10] text-[11px] space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">PLANT STATE:</span>
+                  <span className="inline-flex items-center px-1.5 py-0.5 bg-emerald-950/70 border border-emerald-700 text-emerald-300 text-[10px] font-bold font-mono">
+                    STEADY STATE
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">ACTIVE SHIFT:</span>
+                  <span className="text-slate-300 font-mono">Shift B (Day)</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">OPERATOR:</span>
+                  <span className="text-slate-300 font-mono">Op_John [402]</span>
+                </div>
+                <div className="pt-2 border-t border-slate-800/80 text-[10px] text-slate-400 leading-tight">
+                  Standard: ANSI/ISA-18.2-2016<br />
+                  Buffer Mode: Redis In-Memory Ring
+                </div>
+              </div>
+            </aside>
+
+            {/* Main Center Area */}
+            <main className="flex-1 p-4 overflow-y-auto bg-[#0E131C] space-y-4">
+              {currentTab === 'ACTIVE' && (
+                <ActiveAlarmsView
+                  alarms={activeAlarms}
+                  onAcknowledge={handleAcknowledge}
+                />
+              )}
+
+              {currentTab === 'HISTORICAL' && (
+                <HistoricalAlarmsView
+                  historicalAlarms={historicalAlarms}
+                  unackCount={unackCount}
+                />
+              )}
+
+              {currentTab === 'EVENTS' && (
+                <EventLogView
+                  events={systemEvents}
+                />
+              )}
+            </main>
+          </div>
+
+          {/* 3. Bottom Status Bar */}
+          <footer className="bg-[#090D14] border-t border-slate-800/90 px-4 py-1.5 flex flex-wrap items-center justify-between text-[11px] font-mono text-slate-400">
+            <div className="flex items-center space-x-4">
+              <span className="flex items-center space-x-1.5">
+                <span className="w-2 h-2 bg-emerald-400 rounded-full"></span>
+                <span className="text-slate-300">SCADA PROTOCOL: OPC-UA over TLS 1.3</span>
+              </span>
+              <span className="hidden sm:inline text-slate-600">|</span>
+              <span className="hidden sm:inline">Buffer Engine: Redis v7.2-Cluster</span>
+              <span className="hidden sm:inline text-slate-600">|</span>
+              <span className="hidden sm:inline">Frame Drop Rate: 0.00%</span>
+            </div>
+
+            <div className="flex items-center space-x-3">
+              <span>ANSI/ISA-18.2-2016 State: <strong className="text-cyan-300">COMPLIANT</strong></span>
+              <span className="text-slate-600">|</span>
+              <span>Station ID: CR4-ET-B</span>
+            </div>
+          </footer>
+        </div>
+      );
+    }
+
+    // --- TAB 1: ACTIVE ALARMS VIEW ---
+    function ActiveAlarmsView({ alarms, onAcknowledge }) {
+      const [selectedIds, setSelectedIds] = useState(new Set());
+      const [priorityFilter, setPriorityFilter] = useState('ALL');
+      const [unackOnly, setUnackOnly] = useState(false);
+      const [searchQuery, setSearchQuery] = useState('');
+
+      const totalActive = alarms.length;
+      const unackCount = alarms.filter(a => a.status === 'UNACK_ALARM').length;
+      const criticalCount = alarms.filter(a => a.priority === 'CRITICAL').length;
+      const highCount = alarms.filter(a => a.priority === 'HIGH').length;
+
+      const filteredAlarms = useMemo(() => {
+        return alarms.filter(a => {
+          if (priorityFilter !== 'ALL' && a.priority !== priorityFilter) return false;
+          if (unackOnly && a.status !== 'UNACK_ALARM') return false;
+          if (searchQuery.trim()) {
+            const q = searchQuery.toLowerCase();
+            return (
+              a.tagName.toLowerCase().includes(q) ||
+              a.description.toLowerCase().includes(q) ||
+              a.node.toLowerCase().includes(q)
+            );
+          }
+          return true;
+        });
+      }, [alarms, priorityFilter, unackOnly, searchQuery]);
+
+      const handleSelectAll = (e) => {
+        if (e.target.checked) {
+          setSelectedIds(new Set(filteredAlarms.map(a => a.id)));
+        } else {
+          setSelectedIds(new Set());
+        }
+      };
+
+      const handleSelectRow = (id) => {
+        const next = new Set(selectedIds);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        setSelectedIds(next);
+      };
+
+      const handleBulkAck = () => {
+        if (selectedIds.size === 0) return;
+        onAcknowledge(Array.from(selectedIds));
+        setSelectedIds(new Set());
+      };
+
+      const renderPriorityBadge = (priority) => {
+        switch (priority) {
+          case 'CRITICAL':
+            return (
+              <span className="inline-flex items-center space-x-1.5 px-2 py-0.5 bg-red-950/70 border border-red-600 text-red-300 text-xs font-bold font-mono">
+                <span className="w-2 h-2 bg-red-600 rotate-45 inline-block"></span>
+                <span>CRITICAL</span>
+              </span>
+            );
+          case 'HIGH':
+            return (
+              <span className="inline-flex items-center space-x-1.5 px-2 py-0.5 bg-orange-950/70 border border-orange-500 text-orange-300 text-xs font-bold font-mono">
+                <span className="w-2 h-2 bg-orange-500 inline-block"></span>
+                <span>HIGH</span>
+              </span>
+            );
+          case 'MEDIUM':
+            return (
+              <span className="inline-flex items-center space-x-1.5 px-2 py-0.5 bg-yellow-950/60 border border-yellow-500 text-yellow-300 text-xs font-semibold font-mono">
+                <span className="w-2 h-2 rounded-full bg-yellow-400 inline-block"></span>
+                <span>MEDIUM</span>
+              </span>
+            );
+          case 'LOW':
+            return (
+              <span className="inline-flex items-center space-x-1.5 px-2 py-0.5 bg-blue-950/60 border border-blue-500 text-blue-300 text-xs font-medium font-mono">
+                <span className="w-0 h-0 border-l-[4px] border-l-transparent border-r-[4px] border-r-transparent border-t-[6px] border-t-blue-400 inline-block"></span>
+                <span>LOW</span>
+              </span>
+            );
+          default:
+            return null;
+        }
+      };
+
+      return (
+        <div className="space-y-4">
+          {/* Header KPIs */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="bg-[#121822] border border-slate-800 p-3 flex flex-col justify-between">
+              <div className="flex items-center justify-between text-slate-400 text-xs uppercase tracking-wider font-semibold">
+                <span>Total Active Alarms</span>
+                <span className="text-slate-500 text-[11px] font-mono">PLC LIVE</span>
+              </div>
+              <div className="flex items-baseline space-x-2 mt-2">
+                <span className="text-2xl font-bold font-mono-numbers text-slate-100">{totalActive}</span>
+                <span className="text-xs text-slate-400">active states</span>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-1">Buffered via Redis Stream #s7_live</div>
+            </div>
+
+            <div className={`border p-3 flex flex-col justify-between transition-all ${
+              unackCount > 0 
+                ? 'bg-red-950/30 border-red-700/80 shadow-[inset_0_0_12px_rgba(239,68,68,0.15)]' 
+                : 'bg-[#121822] border-slate-800'
+            }`}>
+              <div className="flex items-center justify-between text-xs uppercase tracking-wider font-semibold">
+                <span className={unackCount > 0 ? 'text-red-300' : 'text-slate-400'}>Unacknowledged Alarms</span>
+                {unackCount > 0 && (
+                  <span className="flex h-2 w-2 relative">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                  </span>
+                )}
+              </div>
+              <div className="flex items-baseline space-x-2 mt-2">
+                <span className={`text-2xl font-bold font-mono-numbers ${unackCount > 0 ? 'text-red-400' : 'text-slate-400'}`}>
+                  {unackCount}
+                </span>
+                <span className="text-xs text-slate-400">require operator ack</span>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-1">Requires physical/HMI acknowledgment</div>
+            </div>
+
+            <div className={`border p-3 flex flex-col justify-between ${
+              criticalCount > 0 ? 'bg-[#1F1316] border-red-600/90' : 'bg-[#121822] border-slate-800'
+            }`}>
+              <div className="flex items-center justify-between text-xs uppercase tracking-wider font-semibold">
+                <span className={criticalCount > 0 ? 'text-red-300' : 'text-slate-400'}>Critical Priority Alarms</span>
+                <span className="text-[10px] font-mono px-1 py-0.5 bg-red-900/60 text-red-200 border border-red-700">ISA CAT 1</span>
+              </div>
+              <div className="flex items-baseline space-x-2 mt-2">
+                <span className={`text-2xl font-bold font-mono-numbers ${criticalCount > 0 ? 'text-red-400' : 'text-slate-400'}`}>
+                  {criticalCount}
+                </span>
+                <span className="text-xs text-slate-400">immediate risk</span>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-1">High-risk trip or safety interlock</div>
+            </div>
+
+            <div className="bg-[#121822] border border-slate-800 p-3 flex flex-col justify-between">
+              <div className="flex items-center justify-between text-slate-400 text-xs uppercase tracking-wider font-semibold">
+                <span>High Priority Alarms</span>
+                <span className="text-orange-400 text-[11px] font-mono">PRIORITY 2</span>
+              </div>
+              <div className="flex items-baseline space-x-2 mt-2">
+                <span className="text-2xl font-bold font-mono-numbers text-orange-300">{highCount}</span>
+                <span className="text-xs text-slate-400">equipment limit warning</span>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-1">Target Ack time: &lt; 5 minutes</div>
+            </div>
+          </div>
+
+          {/* Action Toolbar */}
+          <div className="bg-[#121822] border border-slate-800 p-2.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center border border-slate-800 bg-[#0C1017] p-0.5 text-xs">
+                {['ALL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].map(p => (
+                  <button
+                    key={p}
+                    onClick={() => setPriorityFilter(p)}
+                    className={`px-2 py-1 text-[11px] font-mono transition-colors ${
+                      priorityFilter === p ? 'bg-slate-700 text-cyan-300 font-bold' : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                onClick={() => setUnackOnly(!unackOnly)}
+                className={`px-2.5 py-1 text-xs font-mono border transition-colors flex items-center space-x-1.5 ${
+                  unackOnly ? 'bg-red-950/70 border-red-600 text-red-300' : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <span className={`w-2 h-2 ${unackOnly ? 'bg-red-500' : 'bg-slate-600'}`}></span>
+                <span>UNACK ONLY ({unackCount})</span>
+              </button>
+
+              <div className="relative">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search Tag, Node, Fault..."
+                  className="bg-[#0C1017] border border-slate-800 text-xs px-2.5 py-1 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500 w-52 font-mono"
+                />
+                {searchQuery && (
+                  <button onClick={() => setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 text-xs">×</button>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <span className="text-xs text-slate-400 font-mono-numbers">
+                Selected: <strong className="text-cyan-300">{selectedIds.size}</strong> of {filteredAlarms.length}
+              </span>
+              <button
+                onClick={handleBulkAck}
+                disabled={selectedIds.size === 0}
+                className={`px-3 py-1 text-xs font-semibold tracking-wider uppercase border transition-colors flex items-center space-x-1.5 ${
+                  selectedIds.size > 0
+                    ? 'bg-cyan-900/50 border-cyan-500 text-cyan-200 hover:bg-cyan-800/60 shadow-[0_0_8px_rgba(6,182,212,0.2)]'
+                    : 'bg-slate-900/60 border-slate-800 text-slate-600 cursor-not-allowed'
+                }`}
+              >
+                <span>✓ Acknowledge Selected</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Data Table */}
+          <div className="bg-[#121822] border border-slate-800 overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="bg-[#0D131C] border-b border-slate-800 text-slate-400 uppercase tracking-wider font-semibold font-mono text-[11px]">
+                  <th className="p-2.5 w-10 text-center">
+                    <input
+                      type="checkbox"
+                      checked={filteredAlarms.length > 0 && selectedIds.size === filteredAlarms.length}
+                      onChange={handleSelectAll}
+                      className="rounded-none bg-slate-900 border-slate-700 text-cyan-500 focus:ring-0 cursor-pointer"
+                    />
+                  </th>
+                  <th className="p-2.5 w-40">Timestamp</th>
+                  <th className="p-2.5 w-28">Priority</th>
+                  <th className="p-2.5 w-36">Tag Name / Node</th>
+                  <th className="p-2.5">Fault Description</th>
+                  <th className="p-2.5 w-32 font-mono-numbers">Value / Limit</th>
+                  <th className="p-2.5 w-36">Status</th>
+                  <th className="p-2.5 w-28 text-center">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/80">
+                {filteredAlarms.length === 0 ? (
+                  <tr>
+                    <td colSpan="8" className="p-8 text-center text-slate-500 font-mono">
+                      No active alarms match the current filter criteria.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredAlarms.map((alarm) => {
+                    const isSelected = selectedIds.has(alarm.id);
+                    const isUnack = alarm.status === 'UNACK_ALARM';
+                    
+                    let unackClass = '';
+                    if (isUnack) {
+                      if (alarm.priority === 'CRITICAL') unackClass = 'alarm-unack-critical';
+                      else if (alarm.priority === 'HIGH') unackClass = 'alarm-unack-high';
+                      else if (alarm.priority === 'MEDIUM') unackClass = 'alarm-unack-medium';
+                      else unackClass = 'alarm-unack-low';
+                    }
+
+                    return (
+                      <tr
+                        key={alarm.id}
+                        className={`transition-colors ${
+                          isSelected
+                            ? 'bg-[#152336]'
+                            : isUnack
+                            ? 'bg-[#17151D] hover:bg-[#1E1926]'
+                            : 'hover:bg-[#151D28]'
+                        }`}
+                      >
+                        <td className="p-2.5 text-center">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => handleSelectRow(alarm.id)}
+                            className="rounded-none bg-slate-900 border-slate-700 text-cyan-500 focus:ring-0 cursor-pointer"
+                          />
+                        </td>
+                        <td className="p-2.5 font-mono-numbers text-slate-300 whitespace-nowrap">
+                          {alarm.timestamp}
+                        </td>
+                        <td className="p-2.5">
+                          {renderPriorityBadge(alarm.priority)}
+                        </td>
+                        <td className="p-2.5">
+                          <div className="font-mono font-bold text-slate-100 tracking-wide">
+                            {alarm.tagName}
+                          </div>
+                          <div className="text-[10px] text-slate-400 font-mono truncate max-w-[140px]" title={alarm.node}>
+                            {alarm.node}
+                          </div>
+                        </td>
+                        <td className="p-2.5 text-slate-200">
+                          <div className="font-medium">{alarm.description}</div>
+                          {alarm.acknowledgedBy && (
+                            <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                              Ack: {alarm.acknowledgedBy} ({alarm.acknowledgedAt})
+                            </div>
+                          )}
+                        </td>
+                        <td className="p-2.5 font-mono-numbers text-slate-200 whitespace-nowrap">
+                          <span className="font-bold text-slate-100">{alarm.processValue}</span>
+                          <span className="text-slate-400 text-[11px]"> / {alarm.tripLimit} {alarm.engineeringUnit}</span>
+                        </td>
+                        <td className="p-2.5">
+                          {isUnack ? (
+                            <div className={`inline-flex items-center space-x-1.5 px-2 py-0.5 border text-[11px] font-bold font-mono ${unackClass}`}>
+                              <span className="w-2 h-2 bg-red-400 rounded-full animate-ping"></span>
+                              <span>ACTIVE / UNACK</span>
+                            </div>
+                          ) : (
+                            <div className="inline-flex items-center space-x-1.5 px-2 py-0.5 bg-slate-800/80 border border-slate-600 text-slate-300 text-[11px] font-semibold font-mono">
+                              <span className="w-2 h-2 bg-emerald-400"></span>
+                              <span>ACTIVE / ACKED</span>
+                            </div>
+                          )}
+                        </td>
+                        <td className="p-2.5 text-center">
+                          {isUnack ? (
+                            <button
+                              onClick={() => onAcknowledge([alarm.id])}
+                              className="px-2.5 py-1 text-[11px] font-mono font-bold tracking-wider uppercase bg-cyan-950/80 border border-cyan-600 text-cyan-300 hover:bg-cyan-900 transition-colors shadow-sm"
+                            >
+                              ACK
+                            </button>
+                          ) : (
+                            <span className="text-[11px] font-mono text-slate-400 italic">
+                              ACKED
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono px-1">
+            <span>Showing {filteredAlarms.length} of {alarms.length} active alarms</span>
+            <span>Standard: ISA-18.2-2016 Alarm State Model (UNACK -&gt; ACK -&gt; RTN)</span>
+          </div>
+        </div>
+      );
+    }
+
+    // --- TAB 2: HISTORICAL ALARMS & ISA-18.2 ANALYTICS VIEW ---
+    function HistoricalAlarmsView({ historicalAlarms }) {
+      const [timeRange, setTimeRange] = useState('24H');
+      const [filterPriority, setFilterPriority] = useState('ALL');
+      const [hoveredPoint, setHoveredPoint] = useState(null);
+
+      const timeSeriesData = TIME_SERIES_BUCKETS[timeRange];
+      const maxVal = Math.max(...timeSeriesData.map(d => d.total), 10);
+
+      const filteredRecords = historicalAlarms.filter(a => {
+        if (filterPriority !== 'ALL' && a.priority !== filterPriority) return false;
+        return true;
+      });
+
+      const avgPerHour = timeRange === '1H' ? 6.2 : timeRange === '24H' ? 4.8 : 3.9;
+      const peakVal = timeRange === '1H' ? 9 : timeRange === '24H' ? 23 : 31;
+      const isAvgPass = avgPerHour <= 6.0;
+
+      const renderPriorityBadge = (priority) => {
+        switch (priority) {
+          case 'CRITICAL':
+            return (
+              <span className="inline-flex items-center space-x-1 px-1.5 py-0.5 bg-red-950/60 border border-red-600 text-red-300 text-[10px] font-bold font-mono">
+                <span className="w-1.5 h-1.5 bg-red-600 rotate-45 inline-block"></span>
+                <span>CRITICAL</span>
+              </span>
+            );
+          case 'HIGH':
+            return (
+              <span className="inline-flex items-center space-x-1 px-1.5 py-0.5 bg-orange-950/60 border border-orange-500 text-orange-300 text-[10px] font-bold font-mono">
+                <span className="w-1.5 h-1.5 bg-orange-500 inline-block"></span>
+                <span>HIGH</span>
+              </span>
+            );
+          case 'MEDIUM':
+            return (
+              <span className="inline-flex items-center space-x-1 px-1.5 py-0.5 bg-yellow-950/60 border border-yellow-500 text-yellow-300 text-[10px] font-semibold font-mono">
+                <span className="w-1.5 h-1.5 rounded-full bg-yellow-400 inline-block"></span>
+                <span>MED</span>
+              </span>
+            );
+          case 'LOW':
+            return (
+              <span className="inline-flex items-center space-x-1 px-1.5 py-0.5 bg-blue-950/60 border border-blue-500 text-blue-300 text-[10px] font-medium font-mono">
+                <span className="w-0 h-0 border-l-[3px] border-l-transparent border-r-[3px] border-r-transparent border-t-[5px] border-t-blue-400 inline-block"></span>
+                <span>LOW</span>
+              </span>
+            );
+          default:
+            return null;
+        }
+      };
+
+      return (
+        <div className="space-y-4">
+          {/* Time Filter & Export Toolbar */}
+          <div className="bg-[#121822] border border-slate-800 p-2.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center space-x-3">
+              <div className="flex items-center space-x-2">
+                <span className="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                  Time Filter:
+                </span>
+                <div className="flex border border-slate-800 bg-[#0C1017] p-0.5">
+                  {['1H', '24H', '7D'].map(r => (
+                    <button
+                      key={r}
+                      onClick={() => setTimeRange(r)}
+                      className={`px-3 py-1 text-xs font-mono transition-colors ${
+                        timeRange === r
+                          ? 'bg-cyan-900/60 border border-cyan-500 text-cyan-200 font-bold'
+                          : 'border border-transparent text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {r === '1H' ? 'Last 1 Hour' : r === '24H' ? 'Last 24 Hours' : 'Last 7 Days'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="hidden sm:flex items-center space-x-1.5 text-xs text-slate-400 border-l border-slate-800 pl-3">
+                <span className="w-2 h-2 bg-emerald-400 rounded-full"></span>
+                <span>ISA-18.2 Clause 16 Metrics Engine</span>
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-2 text-xs">
+              <span className="text-slate-400">Export:</span>
+              <button 
+                onClick={() => alert("Simulated CSV Export generated.")}
+                className="px-2.5 py-1 bg-[#0D131C] border border-slate-700 hover:border-slate-500 text-slate-300 font-mono transition-colors"
+              >
+                CSV
+              </button>
+              <button 
+                onClick={() => alert("Simulated PDF ISA-18.2 Compliance Report generated.")}
+                className="px-2.5 py-1 bg-[#0D131C] border border-slate-700 hover:border-slate-500 text-slate-300 font-mono transition-colors"
+              >
+                PDF Report
+              </button>
+            </div>
+          </div>
+
+          {/* KPI Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="bg-[#121822] border border-slate-800 p-3 flex flex-col justify-between">
+              <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-400">
+                <span>Average Alarms / Hour</span>
+                <span className={`px-1.5 py-0.5 text-[10px] font-mono font-bold border ${
+                  isAvgPass ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700' : 'bg-amber-950/70 text-amber-300 border-amber-700'
+                }`}>
+                  {isAvgPass ? 'TARGET MET' : 'ATTENTION'}
+                </span>
+              </div>
+              <div className="flex items-baseline space-x-2 mt-2">
+                <span className={`text-3xl font-bold font-mono-numbers ${isAvgPass ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {avgPerHour}
+                </span>
+                <span className="text-xs text-slate-400">/ hr (Target: &lt; 6.0)</span>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-1">
+                ISA-18.2 Table 2 manageable threshold: &lt; 144 / day
+              </div>
+            </div>
+
+            <div className="bg-[#121822] border border-slate-800 p-3 flex flex-col justify-between">
+              <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-400">
+                <span>Peak Alarms / 10 min</span>
+                <span className={`px-1.5 py-0.5 text-[10px] font-mono font-bold border ${
+                  peakVal > 10 ? 'bg-red-950/70 text-red-300 border-red-700' : 'bg-emerald-950/70 text-emerald-300 border-emerald-700'
+                }`}>
+                  {peakVal > 10 ? 'FLOOD DETECTED' : 'NORMAL'}
+                </span>
+              </div>
+              <div className="flex items-baseline space-x-2 mt-2">
+                <span className={`text-3xl font-bold font-mono-numbers ${peakVal > 10 ? 'text-red-400' : 'text-slate-100'}`}>
+                  {peakVal}
+                </span>
+                <span className="text-xs text-slate-400">peak / 10m (Flood limit: &gt;10)</span>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-1">
+                Alarm flood threshold exceeded during Boiler 2 trip
+              </div>
+            </div>
+
+            <div className="bg-[#121822] border border-slate-800 p-3 flex flex-col justify-between">
+              <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-400">
+                <span>Chattering Bad Actors</span>
+                <span className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-amber-950/70 text-amber-300 border border-amber-700">
+                  ACTION REQ
+                </span>
+              </div>
+              <div className="flex items-baseline space-x-2 mt-2">
+                <span className="text-3xl font-bold font-mono-numbers text-amber-400">2</span>
+                <span className="text-xs text-slate-400">tags (&gt;3 transitions / min)</span>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-1">
+                Recommend deadband adjustment on PUMP02_Press
+              </div>
+            </div>
+
+            <div className="bg-[#121822] border border-slate-800 p-3 flex flex-col justify-between">
+              <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-400">
+                <span>Ack Compliance (&lt;5 min)</span>
+                <span className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-emerald-950/70 text-emerald-300 border border-emerald-700">
+                  94.2% PASS
+                </span>
+              </div>
+              <div className="flex items-baseline space-x-2 mt-2">
+                <span className="text-3xl font-bold font-mono-numbers text-cyan-400">94.2%</span>
+                <span className="text-xs text-slate-400">prompt operator response</span>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-1">
+                Mean Time To Acknowledge: 42 seconds
+              </div>
+            </div>
+          </div>
+
+          {/* Charts (Side by Side) */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            {/* Chart 1: Pareto Bad Actors */}
+            <div className="bg-[#121822] border border-slate-800 p-3.5 flex flex-col justify-between">
+              <div className="flex items-center justify-between mb-3 border-b border-slate-800 pb-2">
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                    Top 5 Most Frequent Alarms (Pareto / Bad Actors)
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    Identifies chattering tags contributing to &gt;80% of total operator load
+                  </div>
+                </div>
+                <span className="text-[10px] font-mono bg-slate-800 px-2 py-0.5 text-cyan-300 border border-slate-700">
+                  80/20 RULE
+                </span>
+              </div>
+
+              <div className="space-y-2.5 pt-1">
+                {MOCK_PARETO.map((item, idx) => (
+                  <div key={item.tagName} className="space-y-1">
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <div className="flex items-center space-x-2">
+                        <span className="text-slate-500 font-bold w-4">#{idx + 1}</span>
+                        <span className="font-bold text-slate-200">{item.tagName}</span>
+                        <span className="text-[11px] text-slate-400 truncate max-w-[150px] hidden sm:inline">
+                          ({item.description})
+                        </span>
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <span className="font-mono-numbers font-bold text-cyan-300">{item.count} hits</span>
+                        <span className="text-slate-500 text-[11px]">({item.percentage}%)</span>
+                        <span className="text-amber-400 text-[11px] font-bold">Cum: {item.cumulative}%</span>
+                      </div>
+                    </div>
+
+                    <div className="w-full bg-[#0A0E15] h-3 border border-slate-800 relative flex items-center">
+                      <div
+                        className={`h-full transition-all ${
+                          item.priority === 'CRITICAL' 
+                            ? 'bg-red-600/80' 
+                            : item.priority === 'HIGH' 
+                            ? 'bg-orange-500/80' 
+                            : 'bg-cyan-600/80'
+                        }`}
+                        style={{ width: `${item.percentage * 2}%` }}
+                      />
+                      <div
+                        className="absolute top-0 bottom-0 w-0.5 bg-amber-400 z-10"
+                        style={{ left: `${item.cumulative}%` }}
+                        title={`Cumulative: ${item.cumulative}%`}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-slate-400 pt-3 border-t border-slate-800/80 mt-3 font-mono">
+                <span>Cumulative 80% cutoff: TK101_Level</span>
+                <span className="text-amber-400">Amber line: Cumulative %</span>
+              </div>
+            </div>
+
+            {/* Chart 2: Time Series Plant Trip Spikes */}
+            <div className="bg-[#121822] border border-slate-800 p-3.5 flex flex-col justify-between">
+              <div className="flex items-center justify-between mb-2 border-b border-slate-800 pb-2">
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                    Alarm Frequency Over Time ({timeRange})
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    Showing spikes during plant trips (ISA-18.2 flood threshold: 10)
+                  </div>
+                </div>
+                <span className="text-[10px] font-mono bg-red-950/70 border border-red-700 text-red-300 px-1.5 py-0.5">
+                  TRIP SPIKE
+                </span>
+              </div>
+
+              <div className="relative h-48 w-full flex items-end pt-4 pb-6 px-4 bg-[#090D14] border border-slate-800">
+                {/* Flood threshold dashed line */}
+                <div 
+                  className="absolute left-0 right-0 border-b border-dashed border-red-500/60 z-10 flex items-center justify-end pr-2"
+                  style={{ bottom: `${(10 / maxVal) * 100}%` }}
+                >
+                  <span className="text-[9px] font-mono text-red-400 bg-[#090D14] px-1 -mb-3">
+                    FLOOD THRESHOLD (&gt;10)
+                  </span>
+                </div>
+
+                {/* Bars */}
+                <div className="w-full h-full flex items-end justify-between gap-1 z-20">
+                  {timeSeriesData.map((bucket) => {
+                    const heightPercent = Math.max((bucket.total / maxVal) * 100, 4);
+                    const isTrip = !!bucket.tripMarker;
+                    const isOver = bucket.total > 10;
+
+                    return (
+                      <div
+                        key={bucket.timeLabel}
+                        className="flex-1 flex flex-col items-center h-full justify-end group relative cursor-pointer"
+                        onMouseEnter={() => setHoveredPoint(bucket)}
+                        onMouseLeave={() => setHoveredPoint(null)}
+                      >
+                        {isTrip && (
+                          <div className="absolute top-1 bg-red-900 border border-red-500 text-red-200 text-[9px] font-mono px-1 py-0.5 rounded-none whitespace-nowrap animate-bounce z-30">
+                            ▲ {bucket.tripMarker}
+                          </div>
+                        )}
+
+                        <div 
+                          className={`w-full transition-all duration-200 ${
+                            isOver 
+                              ? 'bg-gradient-to-t from-red-700 via-orange-600 to-red-500 border-t-2 border-red-300' 
+                              : 'bg-gradient-to-t from-cyan-950 via-cyan-800 to-cyan-500 hover:from-cyan-900 hover:to-cyan-400'
+                          }`}
+                          style={{ height: `${heightPercent}%` }}
+                        />
+
+                        <span className="absolute -bottom-5 text-[10px] font-mono text-slate-400 group-hover:text-cyan-300 whitespace-nowrap">
+                          {bucket.timeLabel}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {hoveredPoint && (
+                  <div className="absolute top-2 right-4 bg-slate-900 border border-cyan-500 text-xs px-2.5 py-1 z-40 font-mono shadow-lg">
+                    <span className="text-slate-400">{hoveredPoint.timeLabel}: </span>
+                    <strong className="text-cyan-300">{hoveredPoint.total} alarms</strong>
+                    {hoveredPoint.tripMarker && <div className="text-red-400 text-[11px]">Trip: {hoveredPoint.tripMarker}</div>}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-slate-400 pt-2 border-t border-slate-800/80 mt-2 font-mono">
+                <span className="text-red-400">--- Dotted Line: Flood Threshold (&gt;10 alarms/10m)</span>
+                <span>Spike caused by Steam Boiler Trip at 06:00</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Historical Log Table */}
+          <div className="bg-[#121822] border border-slate-800 p-2.5 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                  Historical Alarm Log
+                </span>
+                <span className="text-[11px] text-slate-400">
+                  (Showing resolved and cleared events with duration)
+                </span>
+              </div>
+
+              <div className="flex items-center space-x-1 text-xs font-mono">
+                <span className="text-slate-400">Filter:</span>
+                {['ALL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].map(p => (
+                  <button
+                    key={p}
+                    onClick={() => setFilterPriority(p)}
+                    className={`px-2 py-0.5 text-[10px] ${
+                      filterPriority === p ? 'bg-cyan-900 text-cyan-200 font-bold border border-cyan-600' : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="overflow-x-auto border border-slate-800/80">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-[#0D131C] border-b border-slate-800 text-slate-400 uppercase tracking-wider font-semibold font-mono text-[11px]">
+                    <th className="p-2.5 w-24">Priority</th>
+                    <th className="p-2.5 w-36">Tag Name</th>
+                    <th className="p-2.5">Fault Description</th>
+                    <th className="p-2.5 w-36 font-mono-numbers">Time In</th>
+                    <th className="p-2.5 w-36 font-mono-numbers">Time Out</th>
+                    <th className="p-2.5 w-28 font-mono-numbers">Duration</th>
+                    <th className="p-2.5 w-36">Operator Ack</th>
+                    <th className="p-2.5 w-24 text-center">Chatter</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/80">
+                  {filteredRecords.map((rec) => (
+                    <tr key={rec.id} className="hover:bg-[#151D28] transition-colors">
+                      <td className="p-2.5">{renderPriorityBadge(rec.priority)}</td>
+                      <td className="p-2.5 font-mono font-bold text-slate-200">{rec.tagName}</td>
+                      <td className="p-2.5 text-slate-300">{rec.description}</td>
+                      <td className="p-2.5 font-mono-numbers text-slate-400 whitespace-nowrap">{rec.timeIn}</td>
+                      <td className="p-2.5 font-mono-numbers text-slate-400 whitespace-nowrap">{rec.timeOut}</td>
+                      <td className="p-2.5 font-mono-numbers text-cyan-300 font-semibold whitespace-nowrap">{rec.durationFormatted}</td>
+                      <td className="p-2.5 font-mono text-slate-400 text-[11px]">{rec.operatorAck}</td>
+                      <td className="p-2.5 text-center">
+                        {rec.chatteringDetected ? (
+                          <span className="px-1.5 py-0.5 bg-amber-950/70 border border-amber-600 text-amber-300 text-[10px] font-bold font-mono">
+                            CHATTER
+                          </span>
+                        ) : (
+                          <span className="text-slate-400 font-mono text-[11px]">-</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // --- TAB 3: SYSTEM EVENT LOG (AUDIT TRAIL) VIEW ---
+    function EventLogView({ events }) {
+      const [selectedCategory, setSelectedCategory] = useState('ALL');
+      const [searchQuery, setSearchQuery] = useState('');
+
+      const categories = [
+        'ALL',
+        'User Login',
+        'Setpoint Change',
+        'Agentic Recommendation',
+        'Interlock Override',
+        'Recipe Change',
+        'Calibration'
+      ];
+
+      const filteredEvents = useMemo(() => {
+        return events.filter((e) => {
+          if (selectedCategory !== 'ALL' && e.category !== selectedCategory) return false;
+          if (searchQuery.trim()) {
+            const q = searchQuery.toLowerCase();
+            return (
+              e.userId.toLowerCase().includes(q) ||
+              e.actionDetails.toLowerCase().includes(q) ||
+              (e.nodeAffected && e.nodeAffected.toLowerCase().includes(q))
+            );
+          }
+          return true;
+        });
+      }, [events, selectedCategory, searchQuery]);
+
+      const renderCategoryBadge = (category) => {
+        switch (category) {
+          case 'Setpoint Change':
+            return <span className="inline-flex items-center px-2 py-0.5 bg-blue-950/70 border border-blue-600 text-blue-300 text-[11px] font-mono">SETPOINT</span>;
+          case 'Agentic Recommendation':
+            return <span className="inline-flex items-center px-2 py-0.5 bg-purple-950/70 border border-purple-500 text-purple-300 text-[11px] font-mono font-bold">⚡ AGENTIC AI</span>;
+          case 'User Login':
+            return <span className="inline-flex items-center px-2 py-0.5 bg-slate-800 border border-slate-600 text-slate-300 text-[11px] font-mono">SECURITY / AUTH</span>;
+          case 'Interlock Override':
+            return <span className="inline-flex items-center px-2 py-0.5 bg-amber-950/70 border border-amber-600 text-amber-300 text-[11px] font-mono font-bold">BYPASS / OVERRIDE</span>;
+          case 'Recipe Change':
+            return <span className="inline-flex items-center px-2 py-0.5 bg-teal-950/70 border border-teal-600 text-teal-300 text-[11px] font-mono">RECIPE BATCH</span>;
+          case 'Calibration':
+            return <span className="inline-flex items-center px-2 py-0.5 bg-emerald-950/70 border border-emerald-600 text-emerald-300 text-[11px] font-mono">CALIBRATION</span>;
+          default:
+            return <span className="inline-flex items-center px-2 py-0.5 bg-slate-800 border border-slate-700 text-slate-300 text-[11px] font-mono">{category}</span>;
+        }
+      };
+
+      return (
+        <div className="space-y-4">
+          <div className="bg-[#121822] border border-slate-800 p-3 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-200 flex items-center gap-2">
+                <span>System Event Log &amp; Audit Trail</span>
+                <span className="text-[10px] font-mono bg-cyan-950/70 border border-cyan-600 text-cyan-300 px-1.5 py-0.5">
+                  NON-ALARM STATE AUDIT
+                </span>
+              </div>
+              <div className="text-[11px] text-slate-400 mt-0.5">
+                Strict chronological record of operator interventions, setpoint modifications, bypass authorizations, and autonomous AI recommendations.
+              </div>
+            </div>
+            <div className="text-xs font-mono text-slate-400">
+              Total Audit Records: <strong className="text-cyan-300">{events.length}</strong>
+            </div>
+          </div>
+
+          {/* Filter Toolbar */}
+          <div className="bg-[#121822] border border-slate-800 p-2.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs text-slate-400 font-semibold mr-1">Category:</span>
+              {categories.map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => setSelectedCategory(cat)}
+                  className={`px-2 py-1 text-[11px] font-mono border transition-colors ${
+                    selectedCategory === cat
+                      ? 'bg-slate-700 border-slate-500 text-cyan-300 font-bold'
+                      : 'bg-[#0C1017] border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                  }`}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search User, Tag or Action..."
+                className="bg-[#0C1017] border border-slate-800 text-xs px-2.5 py-1 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500 w-56 font-mono"
+              />
+              {searchQuery && (
+                <button onClick={() => setSearchQuery('')} className="text-slate-400 hover:text-slate-200 text-xs">Clear</button>
+              )}
+            </div>
+          </div>
+
+          {/* Events Table */}
+          <div className="bg-[#121822] border border-slate-800 overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="bg-[#0D131C] border-b border-slate-800 text-slate-400 uppercase tracking-wider font-semibold font-mono text-[11px]">
+                  <th className="p-2.5 w-44 font-mono-numbers">Timestamp</th>
+                  <th className="p-2.5 w-44">Category</th>
+                  <th className="p-2.5 w-44">User / Agent ID</th>
+                  <th className="p-2.5 w-36">Node Affected</th>
+                  <th className="p-2.5">Action Details &amp; State Change</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/80">
+                {filteredEvents.length === 0 ? (
+                  <tr>
+                    <td colSpan="5" className="p-8 text-center text-slate-500 font-mono">
+                      No events found matching current search or category filter.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredEvents.map((evt) => (
+                    <tr key={evt.id} className="hover:bg-[#151D28] transition-colors">
+                      <td className="p-2.5 font-mono-numbers text-slate-300 whitespace-nowrap">
+                        {evt.timestamp}
+                      </td>
+                      <td className="p-2.5 whitespace-nowrap">
+                        {renderCategoryBadge(evt.category)}
+                      </td>
+                      <td className="p-2.5">
+                        <div className="flex items-center space-x-2">
+                          <span className="font-mono font-bold text-slate-200">{evt.userId}</span>
+                          <span className={`text-[10px] font-mono px-1.5 py-0.5 border ${
+                            evt.userRole === 'AI Agent' 
+                              ? 'bg-purple-900/50 text-purple-200 border-purple-600' 
+                              : 'bg-slate-900 text-slate-400 border-slate-800'
+                          }`}>
+                            {evt.userRole}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="p-2.5 font-mono text-cyan-300">
+                        {evt.nodeAffected || '-'}
+                      </td>
+                      <td className="p-2.5 text-slate-300">
+                        <div>{evt.actionDetails}</div>
+                        {(evt.previousValue || evt.newValue) && (
+                          <div className="text-[11px] font-mono text-slate-400 mt-1 flex items-center space-x-2">
+                            <span className="bg-slate-900 px-1 py-0.5 border border-slate-800 text-slate-400">
+                              PREV: {evt.previousValue}
+                            </span>
+                            <span>→</span>
+                            <span className="bg-slate-900 px-1 py-0.5 border border-cyan-800 text-cyan-300">
+                              NEW: {evt.newValue}
+                            </span>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono px-1">
+            <span>Showing {filteredEvents.length} of {events.length} audit entries</span>
+            <span>Cryptographically verified PLC &amp; SCADA telemetry log</span>
+          </div>
+        </div>
+      );
+    }
+
+    // Mount React App
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<IndustrialDashboard />);
+  </script>
+</body>
+</html>
